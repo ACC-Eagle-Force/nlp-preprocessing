@@ -3,6 +3,7 @@ ACC API - Academic Calendar Core
 Flask API for parsing academic text.
 """
 
+import os
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Any
@@ -209,9 +210,11 @@ def internal_error(error):
 if __name__ == '__main__':
     # Run Flask development server
     logger.info("Starting ACC API server...")
+    port = int(os.environ.get('PORT', 5000))
+    debug = os.environ.get('FLASK_ENV') == 'development'
     app.run(
         host='0.0.0.0',
-        port=5000,
-        debug=True
+        port=port,
+        debug=debug
     )
 

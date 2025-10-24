@@ -1,11 +1,10 @@
 # ACC (Academic Calendar Core)
 
-A simple Flask API for parsing academic text to extract course codes, keywords, deadlines, and dates, plus task management.
+A simple Flask API for parsing academic text to extract course codes, keywords, deadlines, and dates.
 
 ## Features
 
 - **Parse Academic Text**: Extract course codes, keywords, and dates from WhatsApp messages, emails, etc.
-- **Task Management**: Create, read, update, and delete tasks via API
 - **Smart Date Parsing**: Handles ISO format, natural language, and relative dates
 - **Batch Processing**: Parse multiple texts at once
 - **RESTful API**: Clean, simple endpoints
@@ -34,13 +33,10 @@ curl -X POST http://localhost:5000/parse \
   -H "Content-Type: application/json" \
   -d '{"text": "CSC101 assignment due Oct 15 2025 at 11:59pm"}'
 
-# Create task from text
-curl -X POST http://localhost:5000/tasks \
+# Parse multiple texts
+curl -X POST http://localhost:5000/parse/batch \
   -H "Content-Type: application/json" \
-  -d '{"title": "Assignment", "text": "CSC101 assignment due Oct 15 2025 at 11:59pm"}'
-
-# Get all tasks
-curl http://localhost:5000/tasks
+  -d '{"texts": ["CSC101 exam tomorrow", "MATH201 assignment due Friday"]}'
 ```
 
 ## API Endpoints
@@ -65,7 +61,8 @@ Response:
     "deadline_phrase": "due Oct 15 2025 at 11:59pm",
     "datetime_iso": "2025-10-15T23:59:00+00:00",
     "parser_used": "parsedatetime"
-  }
+  },
+  "timestamp": "2025-10-13T10:30:00+00:00"
 }
 ```
 
@@ -81,46 +78,42 @@ Response:
 }
 ```
 
-### Task Management
-
-**Create Task**
-```bash
-POST /tasks
+Response:
+```json
 {
-  "title": "Assignment",
-  "description": "Complete homework",
-  "text": "CSC101 assignment due Oct 15"  # Optional: auto-parses dates
+  "success": true,
+  "data": {
+    "results": [
+      {
+        "original_text": "CSC101 exam tomorrow",
+        "courses": ["CSC101"],
+        "keywords": ["exam"],
+        "datetime_iso": "2025-10-14T00:00:00+00:00",
+        "parser_used": "dateparser"
+      },
+      {
+        "original_text": "MATH201 assignment due Friday",
+        "courses": ["MATH201"],
+        "keywords": ["assignment", "due"],
+        "datetime_iso": "2025-10-17T00:00:00+00:00",
+        "parser_used": "dateparser"
+      }
+    ],
+    "count": 2
+  },
+  "timestamp": "2025-10-13T10:30:00+00:00"
 }
 ```
 
-**Get All Tasks**
-```bash
-GET /tasks
-GET /tasks?status=pending  # Filter by status
-```
+### Health Check
 
-**Get Task**
-```bash
-GET /tasks/<id>
-```
-
-**Update Task**
-```bash
-PUT /tasks/<id>
+**GET /health**
+```json
 {
-  "title": "New title",
-  "status": "completed"
+  "status": "healthy",
+  "service": "ACC API",
+  "timestamp": "2025-10-13T10:30:00+00:00"
 }
-```
-
-**Delete Task**
-```bash
-DELETE /tasks/<id>
-```
-
-**Complete Task**
-```bash
-POST /tasks/<id>/complete
 ```
 
 ## Use as Module
@@ -161,24 +154,12 @@ submit your work today at her office.
 ### API Integration
 
 ```bash
-# Send WhatsApp message to API
-curl -X POST http://localhost:5000/tasks \
+# Parse WhatsApp message
+curl -X POST http://localhost:5000/parse \
   -H "Content-Type: application/json" \
-  -d '{"title": "DSA Quiz", "text": "Wednesday - DSA, 12noon at the Software Lab"}'
+  -d '{"text": "Wednesday - DSA, 12noon at the Software Lab"}'
 
-# Response: Task created with parsed date!
-```
-
-### Get Pending Tasks
-
-```bash
-curl http://localhost:5000/tasks?status=pending
-```
-
-### Mark Task Complete
-
-```bash
-curl -X POST http://localhost:5000/tasks/1/complete
+# Response: Parsed data with course codes, keywords, and date!
 ```
 
 ## Date Formats Supported
@@ -209,19 +190,17 @@ curl -X POST http://localhost:5000/tasks/1/complete
 **Grading:** grade, marked, graded, result, score  
 **General:** course, subject, module
 
-## Database
-
-Tasks stored in `tasks.db` (SQLite) in the same directory.
-
 ## Project Structure
 
 ```
 ACC/
 ├── acc_core.py      # Core parsing module
-├── app.py           # Flask API (all endpoints)
-├── requirements.txt # Dependencies
-├── README.md        # This file
-└── tasks.db         # SQLite database (auto-created)
+├── app.py           # Flask API (parsing endpoints only)
+├── requirements.txt  # Dependencies
+├── Procfile         # Render deployment configuration
+├── runtime.txt      # Python version specification
+├── .gitignore       # Git ignore rules
+└── README.md        # This file
 ```
 
 ## Development
@@ -232,6 +211,62 @@ python app.py
 ```
 
 Access API at `http://localhost:5000`
+
+## Deployment to Render
+
+### Prerequisites
+- GitHub repository with your code
+- Render account (free tier available)
+
+### Steps
+
+1. **Push your code to GitHub**
+   ```bash
+   git add .
+   git commit -m "Initial commit"
+   git push origin main
+   ```
+
+2. **Create a new Web Service on Render**
+   - Go to [render.com](https://render.com)
+   - Click "New +" → "Web Service"
+   - Connect your GitHub repository
+
+3. **Configure the service**
+   - **Name**: `acc-api` (or your preferred name)
+   - **Environment**: `Python 3`
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `gunicorn app:app`
+   - **Plan**: Free (or upgrade as needed)
+
+4. **Environment Variables** (optional)
+   - `FLASK_ENV`: `production` (for production mode)
+   - `PORT`: Automatically set by Render
+
+5. **Deploy**
+   - Click "Create Web Service"
+   - Render will automatically build and deploy your API
+
+### Your API will be available at:
+```
+https://your-app-name.onrender.com
+```
+
+### Test your deployed API:
+```bash
+curl -X POST https://your-app-name.onrender.com/parse \
+  -H "Content-Type: application/json" \
+  -d '{"text": "CSC101 assignment due tomorrow"}'
+```
+
+### Files for Render Deployment
+
+The following files are included for successful deployment:
+
+- `Procfile` - Tells Render how to run your app
+- `runtime.txt` - Specifies Python version
+- `requirements.txt` - Lists all dependencies including gunicorn
+- `.gitignore` - Excludes unnecessary files from git
 
 ## License
 

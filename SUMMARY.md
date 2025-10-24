@@ -55,10 +55,9 @@ Input: "AgriIOT lab tomorrow to collect graded assignment"
 ```
 ACC/
 ├── acc_core.py      # Enhanced parsing (course codes + keywords)
-├── app.py           # Single API file with all endpoints
+├── app.py           # Flask API with parsing endpoints only
 ├── requirements.txt # Minimal dependencies
-├── README.md        # Complete documentation
-└── .gitignore       # Excludes database files
+└── README.md        # Complete documentation
 ```
 
 ## API Endpoints
@@ -66,14 +65,8 @@ ACC/
 ### Parse Endpoints
 - `POST /parse` - Parse single text
 - `POST /parse/batch` - Parse multiple texts
-
-### Task Management
-- `POST /tasks` - Create task (auto-parses dates)
-- `GET /tasks` - Get all tasks (filter by status)
-- `GET /tasks/<id>` - Get specific task
-- `PUT /tasks/<id>` - Update task
-- `DELETE /tasks/<id>` - Delete task
-- `POST /tasks/<id>/complete` - Mark completed
+- `GET /health` - Health check
+- `GET /` - API information
 
 ## Usage Flow
 
@@ -85,20 +78,21 @@ python app.py
 # "CE 382 HCI presentation tomorrow at 3pm"
 
 # 3. Send to API
-curl -X POST http://localhost:5000/tasks \
+curl -X POST http://localhost:5000/parse \
   -H "Content-Type: application/json" \
-  -d '{"title": "HCI Presentation", "text": "CE 382 HCI presentation tomorrow at 3pm"}'
+  -d '{"text": "CE 382 HCI presentation tomorrow at 3pm"}'
 
 # 4. Response
 {
   "success": true,
   "data": {
-    "id": 1,
-    "title": "HCI Presentation",
+    "original_text": "CE 382 HCI presentation tomorrow at 3pm",
     "courses": ["CE 382", "HCI"],
     "keywords": ["presentation"],
-    "due_date": "2025-10-13T15:00:00+00:00"
-  }
+    "datetime_iso": "2025-10-14T15:00:00+00:00",
+    "parser_used": "dateparser"
+  },
+  "timestamp": "2025-10-13T10:30:00+00:00"
 }
 ```
 
@@ -148,14 +142,12 @@ All types will work! ✅
 ## Security Notes
 
 - ✅ Input validation on all endpoints
-- ✅ SQL injection protection (parameterized queries)
 - ✅ Batch size limits (max 100)
 - ✅ CORS configurable
 - ✅ No sensitive data exposure
 
 ## Production Ready
 
-- ✅ Database persistence (SQLite)
 - ✅ Comprehensive logging
 - ✅ Error handling at all levels
 - ✅ RESTful design
@@ -166,4 +158,3 @@ All types will work! ✅
 ---
 
 **Your API is now production-ready and handles ALL university WhatsApp message types!** 🎉
-
