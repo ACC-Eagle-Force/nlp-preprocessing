@@ -1,0 +1,8 @@
+# ACC Core Dependencies
+dateparser>=1.2.0
+parsedatetime>=2.6
+python-dateutil>=2.8.2
+
+# Flask API Dependencies
+Flask>=3.0.0
+Flask-CORS>=4.0.0
