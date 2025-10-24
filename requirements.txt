@@ -6,3 +6,4 @@ python-dateutil>=2.8.2
 # Flask API Dependencies
 Flask>=3.0.0
 Flask-CORS>=4.0.0
+gunicorn>=20.1.0
