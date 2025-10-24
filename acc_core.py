@@ -1,17 +1,19 @@
 """
-Academic Calendar Core (ACC) Module
+Academic Calendar Core (ACC) Module - Robust Rewrite
 
 A robust parser for extracting course codes, keywords, deadlines, and dates
-from academic-related text strings.
+from academic-related text strings, with special handling for WhatsApp messages
+and complex date contexts.
 
 Author: ACC Team
+Version: 3.0.0
 License: MIT
 """
 
 import re
 import logging
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Optional, Any, Tuple
 
 try:
     import dateparser
@@ -30,18 +32,25 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-# Configuration constants
-# Enhanced course code pattern to match:
-# - Standard: CSC101, MATH201
-# - With spaces: CE 382, CS 101  
-# - Abbreviations: DSA, OS, HCI (only as standalone words)
-COURSE_RE = re.compile(r'\b([A-Z]{2,4}\s\d{2,3}|[A-Z]{2,4}\d{2,3})\b')  # Main pattern
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+# Course code patterns
+COURSE_CODE_RE = re.compile(r'\b([A-Z]{2,4}\s?\d{2,3})\b')
 COURSE_ABBREVIATIONS = {
     'DSA', 'OS', 'HCI', 'AI', 'ML', 'DB', 'DM', 'SE', 'CN', 'TOC', 
-    'DBMS', 'OOP', 'DS', 'NLP', 'CV', 'RL', 'GIS', 'CAD', 'IOT'
+    'DBMS', 'OOP', 'DS', 'NLP', 'CV', 'RL', 'GIS', 'CAD', 'IOT', 'IR'
 }
 
-# Comprehensive university keywords
+# Course name pattern (e.g., "Environmental Management", "Data Structures")
+COURSE_NAME_RE = re.compile(
+    r'\b([A-Z][a-z]+(?:\s+(?:and\s+)?[A-Z][a-z]+){1,3})\s+'
+    r'(?:assignment|exam|quiz|project|course|class|module|test|lab|homework)',
+    re.IGNORECASE
+)
+
+# Academic keywords
 KEYWORDS = [
     # Assessments
     "exam", "test", "quiz", "midterm", "final", "assessment",
@@ -57,35 +66,272 @@ KEYWORDS = [
     "course", "subject", "module"
 ]
 
-# parsedatetime calendar (single instance for efficiency)
+# Deadline trigger words
+DEADLINE_TRIGGERS = ['deadline', 'due', 'submit', 'submission', 'hand in']
+
+# parsedatetime calendar
 _pdt_cal = pdt.Calendar()
 
+# Date exclusion patterns (months, days that confuse parsers)
+EXCLUDE_PATTERNS = {
+    'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 
+    'SEP', 'OCT', 'NOV', 'DEC', 'MON', 'TUE', 'WED', 'THU', 
+    'FRI', 'SAT', 'SUN', 'AM', 'PM', 'GMT', 'UTC'
+}
 
-def parse_date_with_dateparser(text: str, settings: Optional[Dict[str, Any]] = None) -> Optional[datetime]:
+
+# ============================================================================
+# TEXT PREPROCESSING
+# ============================================================================
+
+def clean_whatsapp_format(text: str) -> str:
     """
-    Parse date using dateparser library.
+    Remove WhatsApp message formatting artifacts.
+    
+    Handles:
+    - [10/24/25, 3:45 PM] John Doe: message
+    - John Doe, [10/24/25 3:45 PM] message
+    - Forwarded message metadata
     
     Args:
-        text: Input text containing potential date information
-        settings: Optional dateparser settings dictionary
+        text: Raw WhatsApp message text
         
     Returns:
-        Timezone-aware datetime object in UTC or None if parsing fails
+        Cleaned text without WhatsApp formatting
+    """
+    if not text:
+        return text
+    
+    # Remove WhatsApp timestamp and sender patterns
+    patterns = [
+        r'^\[[\d/]+,?\s+[\d:]+\s*[APM]{2}\]\s*[^:]+:\s*',  # [10/24/25, 3:45 PM] Name:
+        r'^[^,]+,\s*\[[\d/]+\s+[\d:]+\s*[APM]{2}\]\s*',     # Name, [10/24/25 3:45 PM]
+        r'^\[[\d/]+,?\s+[\d:]+\]\s*[^:]+:\s*',              # [10/24/25, 3:45] Name:
+        r'^Forwarded message.*?:\s*',                       # Forwarded message:
+        r'^\d{1,2}/\d{1,2}/\d{2,4},\s+\d{1,2}:\d{2}\s*[APM]{2}\s*-\s*[^:]+:\s*'  # 10/24/25, 3:45 PM - Name:
+    ]
+    
+    cleaned = text
+    for pattern in patterns:
+        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+    
+    return cleaned.strip()
+
+
+def normalize_text(text: str) -> str:
+    """
+    Normalize text for better parsing.
+    
+    - Remove extra whitespace
+    - Normalize quotes
+    - Fix common typos
+    """
+    if not text:
+        return text
+    
+    # Remove multiple spaces
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Normalize quotes
+    text = text.replace('"', '"').replace('"', '"')
+    text = text.replace(''', "'").replace(''', "'")
+    
+    return text.strip()
+
+
+# ============================================================================
+# COURSE CODE EXTRACTION
+# ============================================================================
+
+def extract_course_codes(text: str) -> List[str]:
+    """
+    Extract course codes and course names from text.
+    
+    Extracts:
+    - Standard codes: CSC101, MATH201, CE 382
+    - Abbreviations: DSA, OS, HCI (as whole words)
+    - Full names: "Environmental Management", "Data Structures"
+    
+    Args:
+        text: Input text
         
-    Example:
-        >>> parse_date_with_dateparser("next Monday at 3pm")
-        datetime.datetime(2025, 10, 13, 15, 0, tzinfo=datetime.timezone.utc)
+    Returns:
+        List of unique course identifiers
     """
     if not text or not isinstance(text, str):
-        logger.warning(f"Invalid input to parse_date_with_dateparser: {text}")
-        return None
+        logger.warning(f"Invalid input to extract_course_codes: {text}")
+        return []
+    
+    try:
+        courses = []
+        text_upper = text.upper()
         
+        # 1. Extract standard course codes (CSC101, CE 382)
+        standard_codes = COURSE_CODE_RE.findall(text_upper)
+        for code in standard_codes:
+            # Normalize spacing (CE 382 -> CE382 or keep as is)
+            normalized = code.replace(' ', '')
+            # Filter out date-like patterns (SEP16, OCT24)
+            prefix = normalized[:3]
+            if prefix not in EXCLUDE_PATTERNS:
+                courses.append(code)
+        
+        # 2. Extract course abbreviations (only whole words)
+        words = re.findall(r'\b[A-Z]{2,5}\b', text_upper)
+        for word in words:
+            if word in COURSE_ABBREVIATIONS and word not in courses:
+                courses.append(word)
+        
+        # 3. Extract full course names (Environmental Management, etc.)
+        course_names = COURSE_NAME_RE.findall(text)
+        for name in course_names:
+            # Clean up the name
+            name_clean = name.strip()
+            if name_clean and name_clean not in courses:
+                courses.append(name_clean)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_courses = []
+        for course in courses:
+            course_key = course.upper().replace(' ', '')
+            if course_key not in seen:
+                seen.add(course_key)
+                unique_courses.append(course)
+        
+        return unique_courses
+        
+    except Exception as e:
+        logger.error(f"Error extracting course codes: {e}", exc_info=True)
+        return []
+
+
+# ============================================================================
+# KEYWORD EXTRACTION
+# ============================================================================
+
+def extract_keywords(text: str) -> List[str]:
+    """
+    Extract academic keywords from text.
+    
+    Args:
+        text: Input text
+        
+    Returns:
+        List of found keywords (deduplicated)
+    """
+    if not text or not isinstance(text, str):
+        return []
+    
+    try:
+        text_lower = text.lower()
+        found = []
+        seen = set()
+        
+        for keyword in KEYWORDS:
+            if keyword in text_lower and keyword not in seen:
+                found.append(keyword)
+                seen.add(keyword)
+        
+        return found
+        
+    except Exception as e:
+        logger.error(f"Error extracting keywords: {e}", exc_info=True)
+        return []
+
+
+# ============================================================================
+# DEADLINE PHRASE EXTRACTION
+# ============================================================================
+
+def extract_deadline_context(text: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extract deadline phrase and focused date context.
+    
+    Returns both:
+    1. Full deadline phrase (for context)
+    2. Focused date string (for parsing)
+    
+    Args:
+        text: Input text
+        
+    Returns:
+        Tuple of (full_deadline_phrase, focused_date_string)
+    """
+    if not text or not isinstance(text, str):
+        return None, None
+    
+    try:
+        # Build pattern from deadline triggers
+        triggers = '|'.join(DEADLINE_TRIGGERS)
+        
+        # Match deadline phrase (up to 150 chars after trigger)
+        pattern = rf'({triggers})[^.!?\n]{{0,150}}'
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        
+        if not match:
+            return None, None
+        
+        full_phrase = match.group(0)
+        
+        # Extract FOCUSED date context (after the trigger word)
+        # This removes confusing prior context like "month of February 2025"
+        trigger_word = match.group(1)
+        after_trigger = full_phrase.split(trigger_word, 1)[1] if trigger_word in full_phrase else full_phrase
+        
+        # Look for time/date indicators in the focused part
+        focused_indicators = [
+            r'\b\d{1,2}:\d{2}\s*[ap]m\b',           # 11:59pm
+            r'\b(?:today|tonight|tomorrow)\b',       # today, tomorrow
+            r'\b(?:this|next)\s+\w+\b',              # this Friday, next week
+            r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b',   # 28/02/2025
+            r'\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{4}\b',  # 28 Feb 2025
+            r'\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b'  # Friday
+        ]
+        
+        # Find the earliest date/time indicator
+        earliest_pos = len(after_trigger)
+        earliest_match = None
+        
+        for indicator_pattern in focused_indicators:
+            match_obj = re.search(indicator_pattern, after_trigger, flags=re.IGNORECASE)
+            if match_obj and match_obj.start() < earliest_pos:
+                earliest_pos = match_obj.start()
+                earliest_match = match_obj
+        
+        if earliest_match:
+            # Extract from the earliest indicator to end of phrase
+            focused_text = after_trigger[earliest_pos:]
+            # Limit to reasonable length (first 100 chars after indicator)
+            focused_text = focused_text[:100]
+            return full_phrase, focused_text.strip()
+        
+        # Fallback: use text after trigger
+        return full_phrase, after_trigger.strip()[:100]
+        
+    except Exception as e:
+        logger.error(f"Error extracting deadline context: {e}", exc_info=True)
+        return None, None
+
+
+# ============================================================================
+# DATE PARSING
+# ============================================================================
+
+def parse_with_dateparser(text: str, settings: Optional[Dict[str, Any]] = None) -> Optional[datetime]:
+    """
+    Parse date using dateparser with smart settings.
+    """
+    if not text:
+        return None
+    
     if settings is None:
         settings = {
             "PREFER_DATES_FROM": "future",
             "RETURN_AS_TIMEZONE_AWARE": True,
             "TO_TIMEZONE": "UTC",
-            "RELATIVE_BASE": datetime.now(tz=tz.tzlocal())
+            "RELATIVE_BASE": datetime.now(tz=tz.tzlocal()),
+            "STRICT_PARSING": False
         }
     
     try:
@@ -96,22 +342,11 @@ def parse_date_with_dateparser(text: str, settings: Optional[Dict[str, Any]] = N
         return None
 
 
-def parse_date_with_parsedatetime(text: str) -> Optional[datetime]:
+def parse_with_parsedatetime(text: str) -> Optional[datetime]:
     """
-    Fallback date parser using parsedatetime library.
-    
-    Args:
-        text: Input text containing potential date information
-        
-    Returns:
-        Timezone-aware datetime object in UTC or None if parsing fails
-        
-    Example:
-        >>> parse_date_with_parsedatetime("tomorrow at 5pm")
-        datetime.datetime(2025, 10, 13, 17, 0, tzinfo=datetime.timezone.utc)
+    Parse date using parsedatetime as fallback.
     """
-    if not text or not isinstance(text, str):
-        logger.warning(f"Invalid input to parse_date_with_parsedatetime: {text}")
+    if not text:
         return None
     
     try:
@@ -126,152 +361,122 @@ def parse_date_with_parsedatetime(text: str) -> Optional[datetime]:
         return None
 
 
-def extract_course_codes(text: str) -> List[str]:
+def extract_explicit_date(text: str) -> Optional[datetime]:
     """
-    Extract course codes from text (e.g., CSC101, MATH201, CE 382, DSA).
-    
-    Args:
-        text: Input text to search for course codes
-        
-    Returns:
-        List of found course codes
-        
-    Example:
-        >>> extract_course_codes("CSC101 and MATH201 exams")
-        ['CSC101', 'MATH201']
-        >>> extract_course_codes("CE 382 HCI presentation")
-        ['CE 382', 'HCI']
+    Extract explicit date formats (ISO, common formats).
+    Fast path for well-formatted dates.
     """
-    if not text or not isinstance(text, str):
-        logger.warning(f"Invalid input to extract_course_codes: {text}")
-        return []
-    
-    try:
-        text_upper = text.upper()
-        courses = []
-        
-        # Filter out common false positives (month names, etc.)
-        EXCLUDE_PATTERNS = {
-            'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 
-            'SEP', 'OCT', 'NOV', 'DEC', 'MON', 'TUE', 'WED', 'THU', 
-            'FRI', 'SAT', 'SUN', 'AM', 'PM', 'GMT', 'UTC'
-        }
-        
-        # Extract standard course codes (e.g., CSC101, CE 382)
-        standard_courses = COURSE_RE.findall(text_upper)
-        for course in standard_courses:
-            # Filter out dates like "SEP 16"
-            prefix = course.split()[0] if ' ' in course else course[:3]
-            if prefix not in EXCLUDE_PATTERNS:
-                courses.append(course)
-        
-        # Extract abbreviations (only if they appear as whole words)
-        words = re.findall(r'\b[A-Z]+\b', text_upper)
-        for word in words:
-            if word in COURSE_ABBREVIATIONS and word not in courses:
-                courses.append(word)
-        
-        return courses
-    except Exception as e:
-        logger.error(f"Error extracting course codes: {e}")
-        return []
-
-
-def extract_keywords(text: str) -> List[str]:
-    """
-    Extract academic keywords from text.
-    
-    Args:
-        text: Input text to search for keywords
-        
-    Returns:
-        List of found keywords
-        
-    Example:
-        >>> extract_keywords("Final exam and assignment due")
-        ['exam', 'assignment', 'due', 'final']
-    """
-    if not text or not isinstance(text, str):
-        logger.warning(f"Invalid input to extract_keywords: {text}")
-        return []
-    
-    try:
-        text_lower = text.lower()
-        found = [k for k in KEYWORDS if k in text_lower]
-        return found
-    except Exception as e:
-        logger.error(f"Error extracting keywords: {e}")
-        return []
-
-
-def extract_deadline_phrases(text: str) -> Optional[str]:
-    """
-    Extract deadline-related phrases from text.
-    
-    Args:
-        text: Input text to search for deadline phrases
-        
-    Returns:
-        First matching deadline phrase or None
-        
-    Example:
-        >>> extract_deadline_phrases("Assignment due by Friday at 11:59pm")
-        'due by Friday at 11:59pm'
-    """
-    if not text or not isinstance(text, str):
-        logger.warning(f"Invalid input to extract_deadline_phrases: {text}")
+    if not text:
         return None
     
-    try:
-        pattern = r'(due|deadline|submit (by|before|on)).{0,80}'
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        return match.group(0) if match else None
-    except Exception as e:
-        logger.error(f"Error extracting deadline phrases: {e}")
-        return None
+    patterns = [
+        # ISO formats
+        (r'\b(\d{4}-\d{2}-\d{2}(?:T|\s)\d{2}:\d{2}(?::\d{2})?)\b', "%Y-%m-%d %H:%M"),
+        (r'\b(\d{4}-\d{2}-\d{2})\b', "%Y-%m-%d"),
+        # Common formats
+        (r'\b(\d{1,2}/\d{1,2}/\d{4})\b', "%d/%m/%Y"),
+        (r'\b(\d{1,2}-\d{1,2}-\d{4})\b', "%d-%m-%Y"),
+    ]
+    
+    for pattern, date_format in patterns:
+        match = re.search(pattern, text)
+        if match:
+            try:
+                # Use dateparser for robust parsing
+                dt = parse_with_dateparser(match.group(1))
+                if dt:
+                    return dt
+            except Exception as e:
+                logger.debug(f"Failed to parse explicit date: {e}")
+                continue
+    
+    return None
 
+
+def parse_date_smart(text: str, deadline_focused: Optional[str] = None) -> Tuple[Optional[datetime], str]:
+    """
+    Smart multi-strategy date parsing.
+    
+    Priority:
+    1. Deadline-focused text (if provided)
+    2. Explicit date formats
+    3. Full text with dateparser
+    4. Fallback to parsedatetime
+    
+    Args:
+        text: Full text
+        deadline_focused: Focused deadline date string
+        
+    Returns:
+        Tuple of (parsed_datetime, parser_name)
+    """
+    # Strategy 1: Parse from deadline-focused text first
+    if deadline_focused:
+        logger.info(f"Attempting to parse deadline-focused text: '{deadline_focused}'")
+        
+        # Try explicit date first
+        dt = extract_explicit_date(deadline_focused)
+        if dt:
+            return dt, "deadline-explicit"
+        
+        # Try dateparser
+        dt = parse_with_dateparser(deadline_focused)
+        if dt:
+            return dt, "deadline-dateparser"
+        
+        # Try parsedatetime
+        dt = parse_with_parsedatetime(deadline_focused)
+        if dt:
+            return dt, "deadline-parsedatetime"
+    
+    # Strategy 2: Look for explicit dates in full text
+    dt = extract_explicit_date(text)
+    if dt:
+        return dt, "explicit-format"
+    
+    # Strategy 3: Use dateparser on full text (risky but necessary)
+    dt = parse_with_dateparser(text)
+    if dt:
+        return dt, "dateparser-full"
+    
+    # Strategy 4: Last resort - parsedatetime
+    dt = parse_with_parsedatetime(text)
+    if dt:
+        return dt, "parsedatetime-full"
+    
+    return None, "none"
+
+
+# ============================================================================
+# MAIN PARSING FUNCTION
+# ============================================================================
 
 def parse_dates_from_text(text: str) -> Dict[str, Any]:
     """
-    Combined parsing pipeline to extract all information from academic text.
+    Robust combined parsing pipeline.
     
-    This function:
-    1. Extracts course codes
-    2. Identifies academic keywords
-    3. Finds deadline phrases
-    4. Parses dates using multiple strategies (ISO format, dateparser, parsedatetime)
+    Extracts:
+    - Course codes (standard + full names)
+    - Academic keywords
+    - Deadline phrases
+    - Dates (with smart multi-strategy parsing)
     
     Args:
-        text: Input text containing academic information
+        text: Input academic text
         
     Returns:
-        Dictionary containing:
-            - original_text: The input text
-            - courses: List of course codes found
-            - keywords: List of academic keywords found
-            - deadline_phrase: Extracted deadline phrase (if any)
-            - datetime_utc: Parsed datetime object in UTC (if any)
-            - datetime_iso: ISO format string of the datetime (if any)
-            - parser_used: Name of the parser that succeeded (if any)
-            - error: Error message if something went wrong (if any)
-            
-    Example:
-        >>> result = parse_dates_from_text("CSC101 assignment due by 5 Oct 2025 at 11:59pm")
-        >>> result['courses']
-        ['CSC101']
-        >>> result['keywords']
-        ['assignment', 'due']
-        >>> result['datetime_iso']
-        '2025-10-05T23:59:00+00:00'
+        Dictionary with all extracted information
     """
     # Input validation
     if not text:
-        logger.warning("Empty text provided to parse_dates_from_text")
+        logger.warning("Empty text provided")
         return {
             "original_text": text,
+            "cleaned_text": "",
             "courses": [],
             "keywords": [],
             "deadline_phrase": None,
+            "deadline_focused": None,
             "datetime_utc": None,
             "datetime_iso": None,
             "parser_used": None,
@@ -283,9 +488,11 @@ def parse_dates_from_text(text: str) -> Dict[str, Any]:
         logger.error(error_msg)
         return {
             "original_text": str(text),
+            "cleaned_text": str(text),
             "courses": [],
             "keywords": [],
             "deadline_phrase": None,
+            "deadline_focused": None,
             "datetime_utc": None,
             "datetime_iso": None,
             "parser_used": None,
@@ -293,77 +500,61 @@ def parse_dates_from_text(text: str) -> Dict[str, Any]:
         }
     
     try:
-        # Pre-process text
-        t = text.strip()
+        # Preprocess text
+        cleaned = clean_whatsapp_format(text)
+        cleaned = normalize_text(cleaned)
         
-        # Initialize result dictionary
+        logger.info(f"Processing text: '{text[:100]}...'")
+        logger.info(f"Cleaned text: '{cleaned[:100]}...'")
+        
+        # Extract deadline context
+        deadline_phrase, deadline_focused = extract_deadline_context(cleaned)
+        
+        # Initialize result
         result = {
             "original_text": text,
-            "courses": extract_course_codes(t),
-            "keywords": extract_keywords(t),
-            "deadline_phrase": extract_deadline_phrases(t),
+            "cleaned_text": cleaned,
+            "courses": extract_course_codes(cleaned),
+            "keywords": extract_keywords(cleaned),
+            "deadline_phrase": deadline_phrase,
+            "deadline_focused": deadline_focused,
             "datetime_utc": None,
             "datetime_iso": None,
             "parser_used": None
         }
         
-        # Try ISO format first (fast path for explicit dates)
-        iso_pattern = r'(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(:\d{2})?)?)'
-        iso_match = re.search(iso_pattern, t)
+        # Parse date using smart strategy
+        dt, parser_name = parse_date_smart(cleaned, deadline_focused)
         
-        if iso_match:
-            try:
-                dt = dateparser.parse(
-                    iso_match.group(0),
-                    settings={"RETURN_AS_TIMEZONE_AWARE": True, "TO_TIMEZONE": "UTC"}
-                )
-                if dt:
-                    result.update({
-                        "datetime_utc": dt,
-                        "datetime_iso": dt.isoformat(),
-                        "parser_used": "iso-regex+dateparser"
-                    })
-                    logger.info(f"Successfully parsed date using ISO format: {dt.isoformat()}")
-                    return result
-            except Exception as e:
-                logger.debug(f"ISO format parsing failed: {e}")
-        
-        # Try dateparser
-        dt = parse_date_with_dateparser(t)
         if dt:
-            dt_utc = dt.astimezone(timezone.utc)
+            # Ensure UTC
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            
             result.update({
-                "datetime_utc": dt_utc,
-                "datetime_iso": dt_utc.isoformat(),
-                "parser_used": "dateparser"
+                "datetime_utc": dt,
+                "datetime_iso": dt.isoformat(),
+                "parser_used": parser_name
             })
-            logger.info(f"Successfully parsed date using dateparser: {dt_utc.isoformat()}")
-            return result
+            
+            logger.info(f"Successfully parsed date: {dt.isoformat()} (parser: {parser_name})")
+        else:
+            logger.info("No date found in text")
         
-        # Fallback to parsedatetime
-        dt = parse_date_with_parsedatetime(t)
-        if dt:
-            dt_utc = dt.astimezone(timezone.utc)
-            result.update({
-                "datetime_utc": dt_utc,
-                "datetime_iso": dt_utc.isoformat(),
-                "parser_used": "parsedatetime"
-            })
-            logger.info(f"Successfully parsed date using parsedatetime: {dt_utc.isoformat()}")
-            return result
-        
-        # No date found
-        logger.info(f"No date found in text: {text}")
         return result
         
     except Exception as e:
-        error_msg = f"Unexpected error parsing text: {e}"
+        error_msg = f"Unexpected error: {e}"
         logger.error(error_msg, exc_info=True)
         return {
             "original_text": text,
+            "cleaned_text": text,
             "courses": [],
             "keywords": [],
             "deadline_phrase": None,
+            "deadline_focused": None,
             "datetime_utc": None,
             "datetime_iso": None,
             "parser_used": None,
@@ -371,32 +562,45 @@ def parse_dates_from_text(text: str) -> Dict[str, Any]:
         }
 
 
+# ============================================================================
+# TEST FUNCTION
+# ============================================================================
+
 def main():
-    """Test function with sample inputs."""
-    samples = [
-        "csc101 assignment due by 5 Oct 2025 at 11:59pm",
-        "project meeting next monday 3pm",
-        "submit before 2025-10-05",
-        "final exam 12/12/25",
-        "quiz in 3 days",
-        "MATH201 midterm on 2025-11-15 at 2:00pm"
+    """Test the parser with various inputs."""
+    test_cases = [
+        "Good afternoon Ladies and Gentlemen Kindly note that today ends the month of February 2025 and the deadline for the Environmental Management assignment is 11:59pm today Thank you",
+        "[10/24/25, 3:45 PM] John: CSC101 assignment due by 5 Oct 2025 at 11:59pm",
+        "DSA project submission before Friday at midnight",
+        "Machine Learning exam on 2025-11-15 at 2:00pm",
+        "Submit Data Structures homework by tomorrow 5pm",
+        "CE 382 quiz next Monday",
+        "Final exam for Operating Systems course is on 12/12/25 at 9am"
     ]
     
-    print("Testing ACC Core Module")
-    print("=" * 60)
+    print("=" * 80)
+    print("ACC CORE - ROBUST PARSER TEST")
+    print("=" * 80)
     
-    for sample in samples:
-        print(f"\nInput: {sample}")
-        result = parse_dates_from_text(sample)
+    for i, test in enumerate(test_cases, 1):
+        print(f"\n{'='*80}")
+        print(f"TEST {i}")
+        print(f"{'='*80}")
+        print(f"Input: {test}")
+        print(f"{'-'*80}")
+        
+        result = parse_dates_from_text(test)
+        
+        print(f"Cleaned: {result['cleaned_text']}")
         print(f"Courses: {result['courses']}")
         print(f"Keywords: {result['keywords']}")
-        print(f"Deadline: {result['deadline_phrase']}")
-        print(f"Date: {result['datetime_iso']}")
-        print(f"Parser: {result['parser_used']}")
+        print(f"Deadline Phrase: {result['deadline_phrase']}")
+        print(f"Deadline Focused: {result['deadline_focused']}")
+        print(f"Parsed Date: {result['datetime_iso']}")
+        print(f"Parser Used: {result['parser_used']}")
         if 'error' in result:
             print(f"Error: {result['error']}")
 
 
 if __name__ == "__main__":
     main()
-
